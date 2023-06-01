@@ -34,6 +34,7 @@ pub struct Prompt {
     selection: Option<usize>,
     history_register: Option<char>,
     history_pos: Option<usize>,
+    history_search: Option<String>,
     completion_fn: CompletionFn,
     callback_fn: CallbackFn,
     pub doc_fn: DocFn,
@@ -86,6 +87,7 @@ impl Prompt {
             selection: None,
             history_register,
             history_pos: None,
+            history_search: None,
             completion_fn: Box::new(completion_fn),
             callback_fn: Box::new(callback_fn),
             doc_fn: Box::new(|_| None),
@@ -254,25 +256,30 @@ impl Prompt {
             self.cursor = pos;
         }
         self.recalculate_completion(cx.editor);
+        self.reset_history_search();
     }
 
     pub fn insert_str(&mut self, s: &str, editor: &Editor) {
         self.line.insert_str(self.cursor, s);
         self.cursor += s.len();
         self.recalculate_completion(editor);
+        self.reset_history_search();
     }
 
     pub fn move_cursor(&mut self, movement: Movement) {
         let pos = self.eval_movement(movement);
-        self.cursor = pos
+        self.cursor = pos;
+        self.reset_history_search();
     }
 
     pub fn move_start(&mut self) {
         self.cursor = 0;
+        self.reset_history_search();
     }
 
     pub fn move_end(&mut self) {
         self.cursor = self.line.len();
+        self.reset_history_search();
     }
 
     pub fn delete_char_backwards(&mut self, editor: &Editor) {
@@ -280,6 +287,7 @@ impl Prompt {
         self.line.replace_range(pos..self.cursor, "");
         self.cursor = pos;
 
+        self.reset_history_search();
         self.recalculate_completion(editor);
     }
 
@@ -287,6 +295,7 @@ impl Prompt {
         let pos = self.eval_movement(Movement::ForwardChar(1));
         self.line.replace_range(self.cursor..pos, "");
 
+        self.reset_history_search();
         self.recalculate_completion(editor);
     }
 
@@ -295,6 +304,7 @@ impl Prompt {
         self.line.replace_range(pos..self.cursor, "");
         self.cursor = pos;
 
+        self.reset_history_search();
         self.recalculate_completion(editor);
     }
 
@@ -302,6 +312,7 @@ impl Prompt {
         let pos = self.eval_movement(Movement::ForwardWord(1));
         self.line.replace_range(self.cursor..pos, "");
 
+        self.reset_history_search();
         self.recalculate_completion(editor);
     }
 
@@ -310,6 +321,7 @@ impl Prompt {
         self.line.replace_range(pos..self.cursor, "");
         self.cursor = pos;
 
+        self.reset_history_search();
         self.recalculate_completion(editor);
     }
 
@@ -317,12 +329,14 @@ impl Prompt {
         let pos = self.eval_movement(Movement::EndOfLine);
         self.line.replace_range(self.cursor..pos, "");
 
+        self.reset_history_search();
         self.recalculate_completion(editor);
     }
 
     pub fn clear(&mut self, editor: &Editor) {
         self.line.clear();
         self.cursor = 0;
+        self.reset_history_search();
         self.recalculate_completion(editor);
     }
 
@@ -333,29 +347,38 @@ impl Prompt {
         direction: CompletionDirection,
     ) {
         (self.callback_fn)(cx, &self.line, PromptEvent::Abort);
-        let mut values = match cx.editor.registers.read(register, cx.editor) {
-            Some(values) if values.len() > 0 => values.rev(),
+        let values: Vec<_> = match cx.editor.registers.read(register, cx.editor) {
+            Some(values) if values.len() > 0 => values.rev().collect(),
             _ => return,
         };
 
         let end = values.len().saturating_sub(1);
 
-        let index = match direction {
-            CompletionDirection::Forward => self.history_pos.map_or(0, |i| i + 1),
-            CompletionDirection::Backward => self
-                .history_pos
-                .unwrap_or_else(|| values.len())
-                .saturating_sub(1),
-        }
-        .min(end);
+        let search_term = &*self.history_search.get_or_insert_with(|| self.line.clone());
+        let filter = |(_, v): &(usize, &Cow<'_, str>)| v.starts_with(search_term);
+        let Some((index, _)) = (match direction {
+            CompletionDirection::Forward => values
+                .iter()
+                .enumerate()
+                .skip(self.history_pos.map_or(0, |i| i + 1).min(end))
+                .find(filter),
+            CompletionDirection::Backward => values
+                .iter()
+                .enumerate()
+                .take(self.history_pos.unwrap_or(values.len()))
+                .rev()
+                .find(filter),
+        }) else {
+            return;
+        };
 
-        self.line = values.nth(index).unwrap().to_string();
+        self.line = values.get(index).unwrap().to_string();
         // Appease the borrow checker.
         drop(values);
 
         self.history_pos = Some(index);
 
-        self.move_end();
+        self.cursor = self.line.len();
         (self.callback_fn)(cx, &self.line, PromptEvent::Update);
         self.recalculate_completion(cx.editor);
     }
@@ -379,10 +402,15 @@ impl Prompt {
         self.line.replace_range(range.clone(), &item.content);
 
         self.move_end();
+        self.reset_history_search();
     }
 
     pub fn exit_selection(&mut self) {
         self.selection = None;
+    }
+
+    pub fn reset_history_search(&mut self) {
+        self.history_search = None;
     }
 }
 
@@ -516,7 +544,21 @@ impl Prompt {
             .into();
             text.render(line_area, surface, cx);
         } else {
-            surface.set_string(line_area.x, line_area.y, self.line.clone(), prompt_color);
+            let mut offset = 0;
+
+            // Highlight the search term
+            if let Some(search_term) = self.history_search.as_ref() {
+                surface.set_string(line_area.x, line_area.y, &search_term, selected_color);
+                offset = search_term.len();
+            }
+
+            // Display the rest normally
+            surface.set_string(
+                line_area.x + offset as u16,
+                line_area.y,
+                &self.line[offset..],
+                prompt_color,
+            );
         }
     }
 }
