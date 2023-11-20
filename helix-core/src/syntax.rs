@@ -101,7 +101,8 @@ pub struct LanguageConfiguration {
     pub file_types: Vec<FileType>, // filename extension or ends_with? <Gemfile, rb, etc>
     #[serde(default)]
     pub shebangs: Vec<String>, // interpreter(s) associated with language
-    pub roots: Vec<String>,        // these indicate project roots <.git, Cargo.toml>
+    #[serde(default)]
+    pub roots: Vec<String>, // these indicate project roots <.git, Cargo.toml>
     pub comment_token: Option<String>,
     pub text_width: Option<usize>,
     pub soft_wrap: Option<SoftWrap>,
@@ -1614,7 +1615,7 @@ impl<'a> Iterator for ChunksBytes<'a> {
 }
 
 pub struct RopeProvider<'a>(pub RopeSlice<'a>);
-impl<'a> TextProvider<'a> for RopeProvider<'a> {
+impl<'a> TextProvider<&'a [u8]> for RopeProvider<'a> {
     type I = ChunksBytes<'a>;
 
     fn text(&mut self, node: Node) -> Self::I {
@@ -1628,7 +1629,7 @@ impl<'a> TextProvider<'a> for RopeProvider<'a> {
 struct HighlightIterLayer<'a> {
     _tree: Option<Tree>,
     cursor: QueryCursor,
-    captures: RefCell<iter::Peekable<QueryCaptures<'a, 'a, RopeProvider<'a>>>>,
+    captures: RefCell<iter::Peekable<QueryCaptures<'a, 'a, RopeProvider<'a>, &'a [u8]>>>,
     config: &'a HighlightConfiguration,
     highlight_end_stack: Vec<usize>,
     scope_stack: Vec<LocalScope<'a>>,
